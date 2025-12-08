@@ -1,0 +1,67 @@
+{
+	"version": 1,
+	"base_image": "registry.codeocean.com/codeocean/miniconda3:4.12.0-python3.9-ubuntu20.04",
+	"options": {},
+	"installers": {
+		"conda": {
+			"packages": [
+				{
+					"name": "cartopy",
+					"version": "0.22.0"
+				},
+				{
+					"name": "cftime",
+					"version": "1.6.4"
+				},
+				{
+					"name": "geopandas",
+					"version": "0.14.2"
+				},
+				{
+					"name": "h5netcdf",
+					"version": "1.2.0"
+				},
+				{
+					"name": "netcdf4",
+					"version": "1.6.2"
+				},
+				{
+					"name": "numpy",
+					"version": "1.26.0"
+				},
+				{
+					"name": "pandas",
+					"version": "2.1.1"
+				},
+				{
+					"name": "pyproj",
+					"version": "3.6.1"
+				},
+				{
+					"name": "pytz",
+					"version": "2022.1"
+				},
+				{
+					"name": "scikit-learn",
+					"version": "1.5.2"
+				},
+				{
+					"name": "scipy",
+					"version": "1.11.4"
+				},
+				{
+					"name": "shapely",
+					"version": "2.0.6"
+				},
+				{
+					"name": "xarray",
+					"version": "2023.6.0"
+				},
+				{
+					"name": "zarr",
+					"version": "2.13.3"
+				}
+			]
+		}
+	}
+}

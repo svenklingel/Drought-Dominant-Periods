@@ -1,0 +1,19 @@
+metadata_version: 1
+name: Shifting dominant periods in extreme climate impacts under global warming
+description: |-
+  This capsule contains all scripts and data to produce the main results of the linked manuscript.
+
+  To produce the results you need to run the following scripts in order:
+  1) bash run_main_N25.sb
+  2) bash run_result_averaging.sh
+
+  The resulting dominant periods are then found in "results/original" for the non-detrended results and in "results/detrended" for the detrended ones. The total affected areas are found in "results/event_counts".
+
+  Abstract of the related paper:
+  Spatio-temporal patterns of extreme climate events have been extensively studied, yet two questions remain underexplored: Do such events occur regularly, and how do regularity patterns change under global warming? We address these questions by investigating dominant periods in crop failure, heatwave, and wildfire data.
+  Here, we show that under pre-industrial conditions dominant periods emerge in 28% of cropland exposed to crop failure and 10% of wildfire-affected areas, likely related to climatic oscillations such as the El Niño-Southern Oscillation, while heatwaves occur irregularly. The number of dominant periods increases by 2-13% during the transition from the pre-industrial era to the anthropocene.
+  In the anthropocene, the occurrence of extreme events shifts towards monotonic growth, replacing previous natural regularity patterns.  Linearly de-trended projections reveal an additional shift towards smaller dominant periods due to climate change. These shifts in regularity are crucial for adaptation planning, and our method offers an additional approach for studying extreme events.
+authors:
+- name: Karim Zantout
+  affiliations:
+  - name: Potsdam Institute for Climate Impact Research
