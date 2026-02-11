@@ -277,6 +277,8 @@ def calc_and_store_statistics(
         if data_type == "dominant_return_period" and not no_trend:
             no_trend_particle = "original"
             path_name = os.path.join(path, "statistical_test")
+            if not os.path.exists(path_name):
+                os.makedirs(path_name)
             with open(
                 os.path.join(
                     path_name,
