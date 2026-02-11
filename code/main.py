@@ -993,9 +993,12 @@ def main():
         log_filename = (
             start.strftime("%Y_%m_%d_%H_%M_%S") + "return_period_calculation.log"
         )
+        # create log directory if it doesn't exist
+        log_dir = os.path.join(os.getcwd(), LOG_PATH)
+        os.makedirs(log_dir, exist_ok=True)
         # include log file
         log_handlers.append(
-            logging.FileHandler(os.path.join(os.getcwd(), LOG_PATH, log_filename))
+            logging.FileHandler(os.path.join(log_dir, log_filename))
         )
     logging.basicConfig(
         format="%(asctime)s [%(levelname)s] %(message)s",
