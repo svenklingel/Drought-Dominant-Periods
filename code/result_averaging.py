@@ -18,7 +18,8 @@ import numpy as np
 import xarray as xr
 import pytz
 import pandas as pd
-from settings import OUTPUT_PATH, TEST_OUTPUT_PATH, LOG_PATH, ALL_IMPACT_MODELS
+from settings import OUTPUT_PATH, TEST_OUTPUT_PATH, LOG_PATH, ALL_IMPACT_MODELS, RUN_CROP_TYPE_RESOLVED
+from util import CROP_DICT
 
 
 # pylint: disable=too-many-locals
@@ -46,7 +47,8 @@ def read_data(
     res_model = {}
     for impact in subdirectories:
         filenames = glob.glob(
-            os.path.join(path, sub_path, data_type, impact, "*", "*.nc"),
+            os.path.join(path, sub_path, data_type, impact) + "/*/*.nc",
+            root_dir=os.path.join(path, sub_path, data_type, impact),
         )
         # sort result files to ssp and n_t
         res[impact] = {}
@@ -62,19 +64,35 @@ def read_data(
             _filename = os.path.basename(filename).split(".")[0].split("_")
             # make sure that only valid impact models are included
             if data_type == "dominant_return_period":
-                if (
-                    filename.split(os.sep)[-2].split("_")[0]
-                    not in ALL_IMPACT_MODELS[impact.split("_")[0]]
-                    or filename.split(os.sep)[-2].split("_")[1]
-                    not in ALL_IMPACT_MODELS[impact.split("_")[1]]
-                ):
-                    continue
+                if not RUN_CROP_TYPE_RESOLVED:
+                    if (
+                        filename.split(os.sep)[-2].split("_")[0]
+                        not in ALL_IMPACT_MODELS[impact.split("_")[0]]
+                        or filename.split(os.sep)[-2].split("_")[1]
+                        not in ALL_IMPACT_MODELS[impact.split("_")[1]]
+                    ):
+                        continue
+                else:
+                    if (
+                        filename.split(os.sep)[-2].split("_")[0]
+                        not in ALL_IMPACT_MODELS["cropfailedarea"]
+                        or impact not in CROP_DICT.values()
+                    ):
+                        continue
             else:
-                if (
-                    filename.split(os.sep)[-2].split("_")[0]
-                    not in ALL_IMPACT_MODELS[impact.split("_")[0]]
-                ):
-                    continue
+                if not RUN_CROP_TYPE_RESOLVED:
+                    if (
+                        filename.split(os.sep)[-2].split("_")[0]
+                        not in ALL_IMPACT_MODELS[impact.split("_")[0]]
+                    ):
+                        continue
+                else:
+                    if (
+                        filename.split(os.sep)[-2].split("_")[0]
+                        not in ALL_IMPACT_MODELS["cropfailedarea"]
+                        or impact not in CROP_DICT.values()
+                    ):
+                        continue
             # get ssp and n_t from filename
             n_t = (
                 _filename[-3]
@@ -86,7 +104,14 @@ def read_data(
                 if data_type == "dominant_return_period"
                 else _filename[-7]
             )
-            model_name = _filename[3]
+            if data_type != "event_counts":
+                model_name = (
+                    _filename[3]
+                    if not RUN_CROP_TYPE_RESOLVED
+                    else _filename[1]
+                )
+            else:
+                model_name = _filename[3]
             if (ssp, n_t) not in res[impact]:
                 res[impact][(ssp, n_t)] = []
             if (ssp, n_t, model_name) not in res_model[impact]:
@@ -277,6 +302,8 @@ def calc_and_store_statistics(
         if data_type == "dominant_return_period" and not no_trend:
             no_trend_particle = "original"
             path_name = os.path.join(path, "statistical_test")
+            if not os.path.exists(path_name):
+                os.mkdir(path_name)
             with open(
                 os.path.join(
                     path_name,
@@ -390,7 +417,8 @@ def read_csv_statistics(is_test: bool, log: logging) -> dict:
     full_data = {}
     for impact in subdirectories:
         filenames = glob.glob(
-            os.path.join(path, "event_counts", impact, "*", "*.csv"),
+            os.path.join(path, "event_counts", impact) + "/*/*.csv",
+            root_dir=os.path.join(path + "event_counts" + impact),
         )
         # sort result files to ssp and n_t
         full_data[impact] = pd.DataFrame()
@@ -517,7 +545,8 @@ def calc_and_store_csv_statistics(is_test: bool, log: logging) -> None:
 
 def create_model_statistics(log: logging) -> None:
     """calculates statistics from all time analysis results"""
-    calc_and_store_csv_statistics(False, log)
+    if not RUN_CROP_TYPE_RESOLVED:
+        calc_and_store_csv_statistics(False, log)
     calc_and_store_statistics("dominant_return_period", True, False, log)
     calc_and_store_statistics("dominant_return_period", False, False, log)
     calc_and_store_statistics("event_counts", False, False, log)
@@ -543,6 +572,15 @@ def main() -> None:
     start = datetime.now(pytz.timezone("UTC"))
     # set up log output form (stdout or file), by default: only stderr
     log_handlers = [logging.StreamHandler(sys.stdout)]
+    if not flags.no_logfile:
+        # create a name for the log file based on the start time
+        log_filename = (
+            start.strftime("%Y_%m_%d_%H_%M_%S") + "return_period_averaging.log"
+        )
+        # include log file
+        log_handlers.append(
+            logging.FileHandler(os.path.join(os.getcwd(), LOG_PATH, log_filename))
+        )
     logging.basicConfig(
         format="%(asctime)s [%(levelname)s] %(message)s",
         level=logging.INFO,
