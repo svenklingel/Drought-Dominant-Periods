@@ -12,24 +12,33 @@ from typing import Union
 import glob
 import csv
 import os
-import scipy.stats
 import logging
+import itertools
 import warnings
-import sys 
+import sys
 import pytz
 import numpy as np
+import scipy.stats
+import matplotlib.pyplot as plt
 import xarray as xr
 from sklearn.metrics import r2_score
-from util import surface_area
+from statsmodels.tsa.ar_model import ar_select_order
+import pandas as pd
+from util import surface_area, CROP_DICT, WORLD_REGIONS
 from settings import (
     SINGLE_GCM_MODEL,
     SINGLE_IMPACT_MODEL,
+    USE_CHI2_FILTER,
+    USE_AR_MODEL,
+    USE_PERCENTILE,
     USE_ALL_GCM_MODELS,
     USE_ALL_IMP_MODELS,
     ALL_SSP_SCENARIOS,
     ALL_GCM_MODELS,
     ALL_IMPACT_MODELS,
     OUTPUT_PATH,
+    REGION_OUTPUT_PATH,
+    RUN_REGIONAL_ANALYSIS,
     LOG_PATH,
     RUN_DOMINANT_FREQUENCY_CALC,
     NT,
@@ -38,46 +47,62 @@ from settings import (
     EPS_CORR,
     USE_MODEL_MEAN,
     INPUT_DATA_PATH,
+    REGION_INPUT_DATA_PATH,
     DATA_MEAN_PATH,
     R2_THRESHOLD,
+    RUN_CROP_TYPE_RESOLVED,
 )
 
 
-def _calc_time_corr(data: xr.Dataset, event: str, event1: str) -> np.array:
+def _calc_time_corr(data: xr.DataArray) -> np.array:
     """
-    Calculates time correlation between event and event1. The data is stored
-    in x.
+    Calculates time correlation of data.
     :param data: Dataset with time-sorted data
-    :param event: name of extreme event
-    :param event1: name of other extreme event
     :return: time correlation array
     """
     # no need to calculate overlap if the left array is zero
-    f_i = data[event].isel(time=range(NT)).values
+    f_i = data.isel(time=range(NT)).values
     if list(set(f_i)) == [0.0]:
         return np.array([0.0] * NT)
     # compute time correlation function
-    f_j = data[event1].isel(time=range(2 * NT)).values
+    f_j = data.isel(time=range(2 * NT)).values
     if list(set(f_j)) == [0.0]:
         return np.array([0.0] * NT)
-    f_j = np.array([f_j[n_shift : n_shift + NT] for n_shift in range(NT)]).reshape(
+    f_j = np.array([f_j[n_shift: n_shift + NT] for n_shift in range(NT)]).reshape(
         NT, NT
     )
     return f_i.dot(f_j.T) / NT
 
 
-def _calc_time_corr_array(data: xr.DataArray, data1: xr.DataArray) -> xr.DataArray:
+def _calc_time_corr_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates time correlation between event and event1. The data is stored
-    in x.
+    Calculates time correlation between data
+    :param data: Dataframe with time-sorted data
+    :return: time correlation array
+    """
+    # no need to calculate overlap if the left array is zero
+    f_i = data.iloc[range(NT)].values
+    # compute time correlation function
+    f_j = data.iloc[range(2*NT)].values
+    f_j = np.array([f_j[n_shift: n_shift + NT] for n_shift in range(NT)])
+    return pd.DataFrame(
+        data=np.einsum("ij,lij->lj", f_i, f_j) / NT,
+        columns=data.columns,
+        index=range(NT),
+    )
+
+
+def _calc_time_corr_array(data: xr.DataArray) -> xr.DataArray:
+    """
+    Calculates time correlation between data
     :param data: Dataset with time-sorted data
     :return: time correlation array
     """
     # no need to calculate overlap if the left array is zero
     f_i = data.isel(time=range(NT)).values
     # compute time correlation function
-    f_j = data1.isel(time=range(2 * NT)).values
-    f_j = np.array([f_j[n_shift : n_shift + NT] for n_shift in range(NT)])
+    f_j = data.isel(time=range(2 * NT)).values
+    f_j = np.array([f_j[n_shift: n_shift + NT] for n_shift in range(NT)])
     return xr.DataArray(
         data=np.einsum("ijk,lijk->ljk", f_i, f_j) / NT,
         dims=data.dims,
@@ -125,6 +150,53 @@ def calc_chi2_significance(
     # scale red noise according to significance level
     spec95 = np.nan_to_num(chi2_stat * rspec_dominant_period, nan=0)
     return power_spectrum_dominant_period >= spec95
+
+
+def calc_chi2_significance_dataframe(
+    data: pd.DataFrame, fourier_power: np.array, idx_dominant_period: np.array
+) -> np.array:
+    """
+    Calculates test result of chi2 test for spectral significance of
+    dominant period
+    """
+    # calculate significance compared to red noise
+    # construct expected red noise spectrum at candidate frequency
+    # see Torrence and Campo 1998 Eq. (17) and Zhang and Moore 2011
+    # Percival and Walden 1993
+    lin_reg = np.polyfit(data.index.values, data.values.astype(float), deg=1)
+    detrended_data = data - (
+        lin_reg[1][None, :]
+        + lin_reg[0][None, :] * data.index.values[:, None]
+    )
+    phi = detrended_data - np.mean(detrended_data, axis=0)
+    phi = np.einsum(
+        "ij,ij->j",
+        phi.loc[range(NT - 1)],
+        phi.loc[range(1, NT)]
+    ) / ((NT - 1) * np.var(data.loc[range(NT-1)], axis=0))
+    rspec = np.zeros_like(np.abs(fourier_power))
+    for h in range(fourier_power.shape[0]):
+        rspec[h] = (1. - phi ** 2) / (1. - 2. * phi * np.cos(2 * np.pi * h / NT) + phi ** 2)
+    # normalize with de-meaned variance which equals sum of power
+    # according to Parseval's theorem
+    rspec = rspec / (rspec.sum(axis=0)[None, :])
+    power_spectrum = fourier_power.copy()
+    power_spectrum = np.nan_to_num(
+        power_spectrum / (power_spectrum.sum(axis=0)[None, :]),
+        nan=0
+    )
+    rspec_dominant_period = np.zeros_like(rspec[0])
+    power_spectrum_dominant_period = np.zeros_like(power_spectrum[0])
+    for i in range(idx_dominant_period.shape[0]):
+        for val in idx_dominant_period[i]["idx"]:
+            rspec_dominant_period[i] = rspec[val, i]
+            power_spectrum_dominant_period[i] = power_spectrum[val, i]
+    # we use the 95% significance level for chi2 test with 2 dof
+    chi2_stat = scipy.stats.chi2.ppf(.95, 2)
+    # scale red noise according to dof
+    spec95 = np.nan_to_num(chi2_stat * rspec_dominant_period, nan=0)
+    # red noise coefficient has to be positive (else blue noise)
+    return np.logical_or(power_spectrum_dominant_period >= spec95, phi < 0)
 
 
 def calc_chi2_significance_array(
@@ -179,10 +251,77 @@ def calc_chi2_significance_array(
     return np.logical_or(power_spectrum_dominant_period >= spec95, phi < 0)
 
 
+def _determine_ARmodel_dominant_period(
+    data: list
+) -> Union[float, None]:
+    """
+    Determines the dominant period of a times series and returns dominant period
+    if there is a significant dominant period and None else. The definition
+    is based on an AR model, see notes.
+    :param data: time series data
+
+    :return res: dominant period
+    """
+    data = pd.Series(
+        data=data,
+        index=pd.to_datetime(
+            [f"{1950+year}-01-01 00:00:00" for year in range(len(data))]
+        )
+    )
+    data.index.freq = "YS"
+    select = ar_select_order(
+        data,
+        int(len(data)/2-1),
+        "aic",
+        glob=True,
+    )
+    res = select.model.fit()
+    res_stats = pd.DataFrame(
+        {
+            'parameters': res.model.exog_names,
+            'value': res.params,
+            'p-value': res.pvalues,
+            'errors': res.bse
+        }
+    )
+    # check if time series is significant and has negative coefficients
+    if (
+        np.max(np.abs(data.values)) < EPS_CORR
+        or res_stats[res_stats["value"] < 0].drop(
+            ["const"], errors="ignore"
+        ).size == 0
+    ):
+        return None
+
+    # calculate spectral density estimate
+    def calc_spectral_density(frequency, coeff):
+        """Calculates spectral density estimate for Autoregression model"""
+        return 1. / np.abs(
+            1 - np.sum(
+                [val * np.exp(-2 * np.pi * 1j * key * frequency) for key, val in coeff.items()]
+            )
+        ) ** 2
+
+    coefficients = res_stats.drop(["const"])["value"].to_dict()
+    coefficients = {
+        int(key.split("y.L")[1]): val for key, val in coefficients.items()
+    }
+    dominant_frequency = scipy.optimize.fminbound(
+        lambda x: -calc_spectral_density(x, coefficients),
+        x1=0,
+        x2=0.5,  # Nyquist frequency
+        xtol=0.001
+    )
+    # TODO: implement Significance test based on Monte Carlo, very expensive?
+    #  but necessary because frequencies are not Fourier and therefore previous
+    #  equations with chi2 distribution do not work
+    return 1. / dominant_frequency
+
+
 # pylint: disable=too-many-branches
 def _determine_dominant_return_period(
-    corr: list,
-) -> (float, np.array, Union[float, None], np.array, np.array):
+    corr: list, data: list
+) -> (float, np.array, Union[float, None], np.array, np.array, Union[float, None]):
     """
     Determines the dominant return period of a Fourier series and returns dominant
     return period if there is a significant dominant return period and 0.0 else. For the
@@ -190,21 +329,25 @@ def _determine_dominant_return_period(
     :param corr: correlation data
 
     :return res: R² of fit, fit, significant dominant return period,
-    Fourier coefficients, and list of the largest Fourier indices
+    Fourier coefficients, and list of the largest Fourier indices, AR dominant period
     """
-    # compute Fourier series coefficients and power spectrum
+    if USE_AR_MODEL:
+        dominant_period_AR_model = _determine_ARmodel_dominant_period(corr)
+    else:
+        dominant_period_AR_model = None
+    # compute Fourier coefficients and power spectrum (with Hann window)
     c_n = np.fft.rfft(corr)
-    V_n = (c_n*c_n.conj()).real 
+    V_n = (c_n*c_n.conj()).real # np.abs(np.fft.rfft(corr * hann(M=NT, sym=False)/np.sum(hann(M=NT, sym=False))))**2
     # non-zero frequency are doubled (complex conjugated frequencies)
     V_n[1:] = V_n[1:]*2
-    # sort indices of coefficients in increasing order
+    # sort indices of power spectrum in increasing order
     sorted_idx = np.flip(np.argpartition(np.abs(c_n), range(-len(c_n), 0)))
     # check if corr is significant
     if np.max(np.abs(corr)) < EPS_CORR:
-        return 1.0, corr, None, c_n, sorted_idx
+        return 1.0, corr, None, c_n, sorted_idx, dominant_period_AR_model
     # check if corr is not constant
     if np.sum(np.abs(c_n[1:])) < 1e-10:
-        return 1.0, corr, 1, c_n, sorted_idx
+        return 1.0, corr, 1, c_n, sorted_idx, dominant_period_AR_model
     # determine the smallest candidate return period which is the gcd of
     # the two largest non-zero coefficients
     largest_nonzero_coeff_indices = sorted_idx[sorted_idx != 0]
@@ -233,14 +376,17 @@ def _determine_dominant_return_period(
         tmp = tmp[:-1]
     # make sure that gcd is also in list of the largest indices
     if gcd not in tmp:
-        return 0, [0.0] * NT, None, c_n, sorted_idx
+        return 0, [0.0] * NT, None, c_n, sorted_idx, dominant_period_AR_model
     # return smallest return period that is non-zero and where
     # the fit fine
     tmp_non_zero = [val for val in tmp if val != 0]
 
-    significant_dominant_period = calc_chi2_significance(corr, V_n, tmp_non_zero[0])
+    significant_dominant_period = (
+        calc_chi2_significance(corr, V_n, tmp_non_zero[0])
+        if USE_CHI2_FILTER else True
+    )
     if not significant_dominant_period:
-        return 0, [0.0] * NT, None, c_n, sorted_idx
+        return 0, [0.0] * NT, None, c_n, sorted_idx, dominant_period_AR_model
 
     fit_n = [0.0 + 1j * 0.0] * len(c_n)
     # replace zero by coefficient at proper position
@@ -262,8 +408,147 @@ def _determine_dominant_return_period(
             np.round(NT / tmp_non_zero[0], decimals=2),
             c_n,
             sorted_idx,
+            dominant_period_AR_model
         )
-    return r2_val, fourier_fit, None, c_n, sorted_idx
+    return r2_val, fourier_fit, None, c_n, sorted_idx, dominant_period_AR_model
+
+
+def _determine_dominant_return_period_dataframe(corr: pd.DataFrame) -> np.array:
+    """
+    Determines the dominant return period of a Fourier series and returns dominant
+    return period if there is a significant dominant return period and 0.0 else. For the
+    definition of a dominant return period, see note.
+    :param corr: correlation data
+
+    :return res: significant dominant return period Fourier coefficients
+    :param corr:
+    """
+    res = np.array([None] * corr.shape[1])
+    # compute Fourier series coefficients and power spectrum (Hann window)
+    c_n = np.fft.rfft(corr.values, axis=0)
+    V_n = (c_n * c_n.conj()).real  # np.abs(
+    #        np.fft.rfft(
+    #            corr * (hann(M=NT, sym=False)/np.sum(hann(M=NT, sym=False)))[:, None, None],
+    #            axis=0
+    #        )
+    #    )**2
+    #    # non-zero frequency are doubled (complex conjugated frequencies)
+    V_n[1:, :] = V_n[1:, :] * 2
+    # sort indices of coefficients in increasing order
+    sorted_idx = np.flip(np.argsort(np.abs(c_n), axis=0), axis=0)
+    # determine the smallest candidate return period which is the gcd of
+    # the two largest non-zero coefficients
+    largest_nonzero_coeff_indices = np.apply_along_axis(
+        lambda x: x[x != 0][:2], axis=0, arr=sorted_idx
+    )
+    gcd = np.gcd(
+        largest_nonzero_coeff_indices[0, :], largest_nonzero_coeff_indices[1, :]
+    )
+    # if gcd == 1 we set it to the return period corresponding to
+    # the maximum non-zero coefficient
+    gcd[
+        np.logical_and(gcd == 1, largest_nonzero_coeff_indices[0, :] > 1)
+    ] = largest_nonzero_coeff_indices[0, :][
+        np.logical_and(gcd == 1, largest_nonzero_coeff_indices[0, :] > 1)
+    ]
+    gcd[
+        np.logical_and(gcd == 1, largest_nonzero_coeff_indices[0, :] <= 1)
+    ] = largest_nonzero_coeff_indices[1, :][
+        np.logical_and(gcd == 1, largest_nonzero_coeff_indices[0, :] <= 1)
+    ]
+    # collect largest coefficients that are multiples of each other
+    # zero return period is always fine and check whether return period is multiple
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore")
+        tmp = np.logical_or(
+            sorted_idx == 0, np.logical_or(sorted_idx % gcd == 0, gcd % sorted_idx == 0)
+        )
+    # find position where above conditions do not apply anymore
+    tmp = np.apply_along_axis(
+        lambda x: np.argmax(np.invert(x)),
+        axis=0,
+        arr=tmp,
+    )
+    # get indices that comply with above conditions
+    tmp = np.array(
+        [
+            {"idx": sorted_idx[: tmp[i], i]}
+            for i in range(tmp.shape[0])
+        ],
+        dtype=object,
+    ).reshape(tmp.shape)
+
+    # remove elements until order of harmonics is increasing
+    def _keep_increasing_subarray(array: np.array) -> np.array:
+        # make exception on c_0 which should be allowed to appear anywhere
+        while any(array[array != 0] != sorted(array[array != 0])):
+            array = array[:-1]
+        return array
+
+    tmp = np.array(
+        [{"idx": _keep_increasing_subarray(val["idx"])} for val in tmp.flatten()],
+        dtype=object,
+    ).reshape(tmp.shape)
+    # dominant period candidate is non-zero
+    tmp_non_zero = np.array(
+        [
+            {"idx": tmp[i]["idx"][tmp[i]["idx"] != 0]}
+            for i in range(tmp.shape[0])
+        ],
+        dtype=object,
+    ).reshape(tmp.shape)
+
+    # if the correlation time series is almost constant there is no need for a test
+    if USE_CHI2_FILTER:
+        # make sure that this candidate is also significant through chi2 test
+        significance_mask = calc_chi2_significance_dataframe(corr, V_n, tmp_non_zero)
+    else:
+        significance_mask = np.ones(V_n[0].shape).astype(bool)
+
+    # test fit of dominant period (cmp. to full time series)
+    fit_n = (np.array([0.0 + 1j * 0.0] * c_n.size)).reshape(c_n.shape)
+    # replace zero by coefficient at proper position
+    for i in range(tmp.shape[0]):
+        for val in tmp[i]["idx"]:
+            fit_n[val, i] = c_n[val, i]
+    # do inverse Fourier transformation to get fit
+    fourier_fit = np.fft.irfft(fit_n, corr.shape[0], axis=0)
+    r2_val = 1 - (
+        1
+        - r2_score(
+            corr.values.reshape(corr.shape[0], -1),
+            fourier_fit.reshape(corr.shape[0], -1),
+            multioutput="raw_values",
+        ).reshape(corr.shape[1:])
+    ) * (corr.shape[0] - 1) / (corr.shape[0] - np.count_nonzero(fit_n, axis=0) - 1)
+    # the return period can be calculated via f=Nt/idx because the inverse
+    # Fourier transform is given by
+    # corr[n] = c_0 + \sum_{idx} [
+    # 2*Re(c_{idx})*cos(2*pi*idx*n/Nt) - 2*Im(c_{idx})*sin(2*pi*idx*n/Nt) ]
+    frequencies = np.fft.rfftfreq(NT)
+    res[r2_val >= R2_THRESHOLD] = np.array(
+        [
+            1.0 / frequencies[val["idx"][0]]
+            for val in tmp_non_zero[r2_val >= R2_THRESHOLD]
+        ]
+    )
+
+    # check if corr is not constant
+    res[np.sum(np.abs(c_n[1:]), axis=0) < 1e-10] = 1
+    # make sure that gcd is also in list of the largest indices
+    res[
+        np.array(
+            [
+                gcd[i] not in tmp[i]["idx"]
+                for i in range(tmp.shape[0])
+            ],
+        ).reshape(tmp.shape)
+    ] = None
+    # check if corr is significant
+    res[(np.max(np.abs(corr), axis=0) < EPS_CORR).values] = None
+    # check if dominant period is significant (cmp. to red noise)
+    res[~significance_mask] = None
+    return res
 
 
 # pylint: disable=too-many-locals
@@ -277,10 +562,15 @@ def _determine_dominant_return_period_array(corr: xr.DataArray) -> xr.DataArray:
     :return res: significant dominant return period Fourier coefficients
     """
     res = np.array([None] * corr[0, :, :].size).reshape(corr.shape[1:])
-    # compute Fourier series coefficients
+    # compute Fourier series coefficients and power spectrum (Hann window)
     c_n = np.fft.rfft(corr, axis=0)
-    V_n = (c_n*c_n.conj()).real
-    # non-zero frequency are doubled (complex conjugated frequencies)
+    V_n = (c_n*c_n.conj()).real  # np.abs(
+#        np.fft.rfft(
+#            corr * (hann(M=NT, sym=False)/np.sum(hann(M=NT, sym=False)))[:, None, None],
+#            axis=0
+#        )
+#    )**2
+#    # non-zero frequency are doubled (complex conjugated frequencies)
     V_n[1:, :, :] = V_n[1:, :, :]*2
     # sort indices of coefficients in increasing order
     sorted_idx = np.flip(np.argsort(np.abs(c_n), axis=0), axis=0)
@@ -338,8 +628,7 @@ def _determine_dominant_return_period_array(corr: xr.DataArray) -> xr.DataArray:
         [{"idx": _keep_increasing_subarray(val["idx"])} for val in tmp.flatten()],
         dtype=object,
     ).reshape(tmp.shape)
-    # return smallest return period that is non-zero and where
-    # the fit fine
+    # dominant period candidate is non-zero
     tmp_non_zero = np.array(
         [
             {"idx": tmp[i, j]["idx"][tmp[i, j]["idx"] != 0]}
@@ -349,8 +638,14 @@ def _determine_dominant_return_period_array(corr: xr.DataArray) -> xr.DataArray:
         dtype=object,
     ).reshape(tmp.shape)
 
-    significance_mask = calc_chi2_significance_array(corr, V_n, tmp_non_zero)
+    # if the correlation time series is almost constant there is no need for a test
+    if USE_CHI2_FILTER:
+        # make sure that this candidate is also significant through chi2 test
+        significance_mask = calc_chi2_significance_array(corr, V_n, tmp_non_zero)
+    else:
+        significance_mask = np.ones(V_n[0].shape).astype(bool)
 
+    # test fit of dominant period (cmp. to full time series)
     fit_n = (np.array([0.0 + 1j * 0.0] * c_n.size)).reshape(c_n.shape)
     # replace zero by coefficient at proper position
     for i in range(tmp.shape[0]):
@@ -378,6 +673,7 @@ def _determine_dominant_return_period_array(corr: xr.DataArray) -> xr.DataArray:
             for val in tmp_non_zero[r2_val >= R2_THRESHOLD]
         ]
     )
+
     # check if corr is not constant
     res[np.sum(np.abs(c_n[1:]), axis=0) < 1e-10] = 1
     # make sure that gcd is also in list of the largest indices
@@ -403,14 +699,14 @@ def _determine_dominant_return_period_array(corr: xr.DataArray) -> xr.DataArray:
 
 
 def _max_idx_val(
-    data: Union[xr.Dataset, xr.DataArray], event: str, event1: str, no_trend: bool
+    data: Union[xr.Dataset, xr.DataArray], event: str, no_trend: bool
 ) -> xr.DataArray:
     """Computes max value and index position of time correlation function"""
     # calculate time correlation
     if isinstance(data, xr.Dataset):
-        corr = _calc_time_corr_array(data[event], data[event1])
+        corr = _calc_time_corr_array(data[event])
     else:
-        corr = _calc_time_corr(data, event, event1)
+        corr = _calc_time_corr(data[event])
     if no_trend:
         # subtract linear trend (only slope-contribution)
         trend = (
@@ -434,14 +730,21 @@ class TimeAnalysisImpacts:
         use_all_gcms: bool = USE_ALL_GCM_MODELS,
         use_all_mods: bool = USE_ALL_IMP_MODELS,
         use_mean: bool = USE_MODEL_MEAN,
+        crop_type: str = "",
     ):
         self.use_all_gcms = use_all_gcms
         self.use_all_mods = use_all_mods
         self.log = log
+        if RUN_CROP_TYPE_RESOLVED and crop_type not in CROP_DICT.values():
+            self.log.error(f"Crop type {crop_type} is not known. Abort!")
+            raise TypeError
+        self.crop_type = crop_type
         self.dominant_return_period_t0 = None
         self.dominant_return_period_t0_no_trend = None
         self.local_dominant_return_period = None
         self.local_dominant_return_period_no_trend = None
+        self.regional_dominant_return_period = None
+        self.regional_dominant_return_period_no_trend = None
         self.use_model_mean = use_mean
         self.data_path = INPUT_DATA_PATH if not self.use_model_mean else DATA_MEAN_PATH
         self.impact_type = impact_type
@@ -463,8 +766,15 @@ class TimeAnalysisImpacts:
         # parse impact time series
         self.impact_time_series = None
         self.read_data()
+        if RUN_REGIONAL_ANALYSIS:
+            self.regional_impact_time_series = None
+            self.read_regional_data()
+            self.plot_regional_data()
         if self.impact_time_series is not None:
             # calculate event impacts in each time bin
+            self.impact_count = {
+                key: {} for key in self.impact_time_series.data_vars.keys()
+            }
             self.impact_count_t0 = {
                 key: {} for key in self.impact_time_series.data_vars.keys()
             }
@@ -508,10 +818,10 @@ class TimeAnalysisImpacts:
         }
         # parse files in DATA_PATH and store in data frame
         filenames = glob.glob(
-            os.path.join(self.data_path, "*.nc4")
+            self.data_path + "/*.nc4"
             if self.use_model_mean
-            else os.path.join(self.data_path, "**/*.nc*"),
-            recursive=True,
+            else self.data_path + "/*/*/*.nc*",
+            root_dir=self.data_path,
         )
         for filename in filenames:
             if not (filename.endswith(".nc4") or filename.endswith(".nc")):
@@ -531,19 +841,33 @@ class TimeAnalysisImpacts:
                 if (
                     os.path.relpath(filename, self.data_path).split(os.sep)[1]
                     not in self.impact_model
+                    and not (RUN_CROP_TYPE_RESOLVED and self.impact_type == "cropfailedarea")
+                ) or (
+                    os.path.relpath(filename, self.data_path).split(os.sep)[1] != "crop_resolved"
+                    and (RUN_CROP_TYPE_RESOLVED and self.impact_type == "cropfailedarea")
                 ):
                     continue
             # remove filetype ending and split
             _filename = os.path.basename(filename).split(".")[0].split("_")
             # check whether data corresponds to desired data
-            if (
-                _filename[3] != self.impact_type
-                or _filename[0] not in self.impact_model
-                or _filename[1] not in self.climate_model
-                or _filename[2] not in self.ssp
-                or _filename[6] != "landarea"
-            ):
-                continue
+            if not RUN_CROP_TYPE_RESOLVED or self.impact_type != "cropfailedarea":
+                if (
+                    _filename[3] != self.impact_type
+                    or _filename[0] not in self.impact_model
+                    or _filename[1] not in self.climate_model
+                    or _filename[2] not in self.ssp
+                    or _filename[6] != "landarea"
+                ):
+                    continue
+            else:
+                if (
+                    _filename[5] != self.impact_type
+                    or _filename[0] not in self.impact_model
+                    or _filename[1] not in self.climate_model
+                    or _filename[2] not in self.ssp
+                    or CROP_DICT.get(_filename[3]) != self.crop_type
+                ):
+                    continue
             self.log.info(f"Reading file {filename}...")
             # append data into a dataframe for each extreme event
             with warnings.catch_warnings():
@@ -563,6 +887,9 @@ class TimeAnalysisImpacts:
                     and _filename[0] == "classic"
                     and _filename[1] == "gfdl-esm4"
                     and _filename[7] == "1601",
+                ) if not (RUN_CROP_TYPE_RESOLVED and self.impact_type == "cropfailedarea") else xr.open_dataset(
+                    filename,
+                    decode_times=False
                 )
             # TODO: remove workaround once cama-flood file is fixed (first year appears twice)
             if (
@@ -633,9 +960,14 @@ class TimeAnalysisImpacts:
         extreme_dict = {key: val for key, val in extreme_dict.items() if len(val)}
         # concat data into a single large dataframe
         self.log.info("Merging data into a single dataframe...")
-        self.impact_time_series = [
-            xr.concat(val, dim="time") for val in extreme_dict.values()
-        ]
+        if not (RUN_CROP_TYPE_RESOLVED and self.impact_type == "cropfailedarea"):
+            self.impact_time_series = [
+                xr.concat(val, dim="time") for val in extreme_dict.values()
+            ]
+        else:
+            self.impact_time_series = [
+                sum(val) for val in extreme_dict.values()
+            ]
         # reduce time range to desired one
         self.impact_time_series = [
             df.sel(time=range(min(t_0s), max(t_0s) + 2 * NT + 1))
@@ -664,22 +996,103 @@ class TimeAnalysisImpacts:
                 f"{self.impact_time_series}"
             )
 
+    def read_regional_data(self):
+        """Read regional time series data"""
+        self.regional_impact_time_series = {}
+        for impact in ALL_IMPACT_MODELS.keys():
+            model_combos = itertools.product(ALL_IMPACT_MODELS[impact], ALL_GCM_MODELS[impact])
+            model_combos = [
+                elem[0]+"_"+elem[1]
+                for elem in model_combos
+            ]
+            self.regional_impact_time_series[impact] = {}
+            for ssp in set(ALL_SSP_SCENARIOS.keys()) - {"historical"}:
+                self.regional_impact_time_series[impact][ssp] = {}
+                for region in WORLD_REGIONS:
+                    self.regional_impact_time_series[impact][ssp][region] = pd.DataFrame(
+                        columns=model_combos,
+                        index=np.arange(1850, 2101)
+                    )
+        # parse files in REGIONAL_DATA_PATH and store in data frame
+        filenames = glob.glob(
+            REGION_INPUT_DATA_PATH + "/*/*/*.csv",
+            root_dir=REGION_INPUT_DATA_PATH,
+        )
+        for filename in filenames:
+            # remove filetype ending and split
+            _filename = os.path.basename(filename).split(".")[0].split("_")
+            # check whether data corresponds to desired data
+            self.log.info(f"Reading file {filename}...")
+            # append data into a dataframe for each extreme event
+            tmp = pd.read_csv(filename, index_col=0)
+            mod_gcm = _filename[0] + "_" + _filename[1]
+            # store historical data to all ssp sections
+            for region, data in tmp.items():
+                if _filename[2] == "historical":
+                    for ssp in [ssp for ssp in ALL_SSP_SCENARIOS.keys() if ssp.startswith("ssp")]:
+                        self.regional_impact_time_series[_filename[3]][ssp][region].update(
+                            pd.DataFrame(data.rename(mod_gcm))
+                        )
+                else:
+                    self.regional_impact_time_series[_filename[3]][_filename[2]][region].update(
+                        pd.DataFrame(data.rename(mod_gcm))
+                    )
+            self.log.info(f"{filename} successfully parsed!\n")
+        # reduce time range to desired one and drop missing empty columns
+        for impact, data in self.regional_impact_time_series.items():
+            for ssp, data1 in data.items():
+                for region, data2 in data1.items():
+                    data1[region] = data2.loc[range(min(t_0s), max(t_0s) + 2 * NT + 1)]
+                    data1[region].dropna(axis=1, inplace=True)
+                    if np.sum(data1[region].isnull().any()):
+                        self.log("Nan values appear in data! Abort!")
+                        raise ValueError
+        self.log.info("Merge done!")
+
+    def plot_regional_data(self,):
+        """Plot regional data time series"""
+        for impact, data in self.regional_impact_time_series.items():
+            for ssp, data1 in data.items():
+                fig, axes = plt.subplots(int(len(WORLD_REGIONS)/2), 2)
+                for idx, (region, data2) in enumerate(data1.items()):
+                    axes[idx // 2, idx % 2].plot(
+                        data2.index.values,
+                        data2.iloc[:, 1].values,
+                    )
+                    axes[idx // 2, idx % 2].set_title(region)
+                fig.savefig(f"{impact}_{ssp}_regional_time_series.pdf", format='pdf')
+        for impact, data in self.regional_impact_time_series.items():
+            for ssp, data1 in data.items():
+                fig, axes = plt.subplots(int(len(WORLD_REGIONS)/2), 2, figsize=(15,30))
+                for idx, (region, data2) in enumerate(data1.items()):
+                    res = _calc_time_corr_dataframe(data2.iloc[-51:])
+                    dom_period = _determine_dominant_return_period_dataframe(res)[1]
+                    axes[idx // 2, idx % 2].plot(
+                        res.index.values,
+                        res.iloc[:, 1].values,
+                        label=f"dom. period={dom_period}"
+                    )
+                    axes[idx // 2, idx % 2].set_title(region)
+                    axes[idx // 2, idx % 2].legend()
+                fig.savefig(f"{impact}_{ssp}_regional_correlation.pdf", format='pdf')
+
     def count_impacts(
         self,
     ) -> None:
         """This function counts impacts in `DT` bins and stores them"""
         nan_data = np.full(
             (
-                self.impact_time_series.dims["lat"],
-                self.impact_time_series.dims["lon"],
+                self.impact_time_series.sizes["lat"],
+                self.impact_time_series.sizes["lon"],
             ),
             np.nan,
         )
         impacted_area = self.impact_time_series * surface_area
-        if self.impact_type == "burntarea":
+        if self.impact_type == "burntarea" and not USE_PERCENTILE:
             # TODO: make sure that we really use the 1% cap
             # rescale by 100*100 due to the cap at 1% in burnt area
             impacted_area = impacted_area / 10.000
+        self.impact_count = impacted_area.sum(dim=["lon", "lat"])
         for impact_event in self.impact_count_t0.keys():
             self.log.info(f"Counting total {impact_event} affected area...")
             self.impact_count_t0[impact_event] = {t_0: nan_data for t_0 in t_0s}
@@ -752,7 +1165,7 @@ class TimeAnalysisImpacts:
                 val_ds = self.impact_time_series.sel(time=range(t_start, t_final))
                 # group by location and determine dominant return period
                 dominant_freq = _max_idx_val(
-                    val_ds[list({event, event})], event, event, no_trend=no_trend
+                    val_ds[list({event, event})], event, no_trend=no_trend
                 )
                 container[(event, event)][t_0] = dominant_freq
                 container[(event, event)][t_0].attrs["standard_name"] = (
@@ -805,14 +1218,13 @@ class TimeAnalysisImpacts:
                     # retrieve indices for relevant times in data frames
                     val_ds = extreme_ds_local.sel(time=range(t_start, t_final))
                     # compute correlation function for shift in [0,Nt]
-                    corr = _calc_time_corr(val_ds, event, event)
+                    corr = _calc_time_corr(val_ds[event])
                     if no_trend:
                         # subtract linear trend (only slope-contribution)
-                        corr = corr - np.polyfit(np.arange(NT), corr, 1)[0] * np.arange(
-                            NT
-                        )
+                        lin_reg = np.polyfit(np.arange(NT), corr, 1)
+                        corr = corr - lin_reg[0] * np.arange(NT)
                     # compute dominant frequency
-                    res = _determine_dominant_return_period(corr)
+                    res = _determine_dominant_return_period(corr, val_ds[event])
                     container[location][(event, event)][t_0] = {
                         "corr": corr,
                         "r2_val": res[0],
@@ -820,10 +1232,60 @@ class TimeAnalysisImpacts:
                         "dominant_ret_per": res[2],
                         "c_n": res[3],
                         "sorted_idx": res[4],
+                        "AR dominant period": res[5]
                     }
+
+    def calculate_regional_dominant_period(self, no_trend: bool) -> None:
+        """Calculate regional dominant return periods"""
+        if not no_trend:
+            self.regional_dominant_return_period = {}
+            container = self.regional_dominant_return_period
+        else:
+            self.regional_dominant_return_period_no_trend = {}
+            container = self.regional_dominant_return_period_no_trend
+        # calculate dominant period in world regions
+        for impact, data in self.regional_impact_time_series.items():
+            container[impact] = {}
+            for ssp, data1 in data.items():
+                container[impact][ssp] = {}
+                for region, data2 in data1.items():
+                    container[impact][ssp][region] = pd.DataFrame(
+                        index=t_0s,
+                        columns=data2.keys(),
+                    )
+                    for t_0 in t_0s:
+                        # determine limits of time window, namely [t,t+Nt)
+                        # for f_i and [t+n,t+Nt+n) for f_j, where n=0,..,Nt-1
+                        t_start = t_0
+                        t_final = t_0 + NT * 2
+                        # retrieve indices for relevant times in data frames
+                        val_ds = data2.loc[range(t_start, t_final)]
+                        # compute correlation function for shift in [0,Nt]
+                        corr = _calc_time_corr_dataframe(val_ds)
+                        if no_trend:
+                            # subtract linear trend (only slope-contribution)
+                            lin_reg = np.polyfit(np.arange(NT), corr.values.astype(float), 1)
+                            corr = corr - np.arange(NT)[:, None] * lin_reg[0][None, :]
+                        # compute dominant frequency
+                        container[impact][ssp][region].loc[t_0] = _determine_dominant_return_period_dataframe(corr)
 
     def store_extreme_count_bins(self) -> None:
         """stores extreme event counts within time bins in output file"""
+        # store total impact count data as netcdf
+        full_path = os.path.join(
+            OUTPUT_PATH,
+            "event_counts",
+            self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type,
+        )
+        if not os.path.exists(full_path):
+            os.makedirs(full_path)
+        impact_particle = self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type
+        self.impact_count.to_netcdf(
+            os.path.join(
+                full_path,
+                f"{self.ssp_name}_{impact_particle}_total_extreme_event_counts.nc",
+            )
+        )
         for impact_type, data in self.impact_count_t0.items():
             self.log.info(
                 f"Storing {self.impact_type}-{impact_type} event counting to file..."
@@ -831,17 +1293,18 @@ class TimeAnalysisImpacts:
             full_path = os.path.join(
                 OUTPUT_PATH,
                 "event_counts",
-                self.impact_type,
+                self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type,
                 impact_type.split("_")[0],
             )
             if not os.path.exists(full_path):
                 os.makedirs(full_path)
             # store impact count data as netcdf
+            impact_particle = self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type
             xr.Dataset({str(key): val for key, val in data.items()}).to_netcdf(
                 os.path.join(
                     full_path,
                     f"{impact_type.split('_')[0]}_{self.ssp_name}"
-                    f"_{self.impact_type}_{impact_type.split('_')[1]}"
+                    f"_{impact_particle}_{impact_type.split('_')[1]}"
                     f"_Nt{NT}_extreme_event_counts.nc",
                 )
             )
@@ -856,7 +1319,7 @@ class TimeAnalysisImpacts:
                 os.path.join(
                     full_path,
                     f"{impact_type.split('_')[0]}_{self.ssp_name}"
-                    f"_{self.impact_type}_{impact_type.split('_')[1]}"
+                    f"_{impact_particle}_{impact_type.split('_')[1]}"
                     f"_Nt{NT}_total_extreme_event_counts.csv",
                 ),
                 "w",
@@ -872,6 +1335,91 @@ class TimeAnalysisImpacts:
             self.log.info(
                 f"{self.impact_type}-{impact_type} "
                 "total event counting successfully stored to file!"
+            )
+
+    def store_cropspecific_dominant_period(self, no_trend: bool):
+        """Stores crop-specific dominant return period (with or without detrending) as netcdf"""
+        if no_trend:
+            container = self.dominant_return_period_t0_no_trend
+            output_subdir = "detrended"
+        else:
+            container = self.dominant_return_period_t0
+            output_subdir = "original"
+        for impact_type, data in container.items():
+            self.log.info(
+                f"Storing {self.impact_type}-{impact_type} event dominant return period to file..."
+            )
+            full_path = os.path.join(
+                OUTPUT_PATH,
+                output_subdir,
+                "dominant_return_period",
+                f"{self.crop_type}",
+                f"{impact_type[0].split('_')[0]}",
+            )
+            if not os.path.exists(full_path):
+                os.makedirs(full_path)
+            # store impact count data as netcdf
+            xr.Dataset({str(key): val.astype(float) for key, val in data.items()}).to_netcdf(
+                os.path.join(
+                    full_path,
+                    f"{self.crop_type}_{impact_type[0].split('_')[1]}"
+                    f"_{self.ssp_name}_extreme_event_Nt{NT}_dominant_frequency.nc",
+                )
+            )
+            self.log.info(
+                f"{self.crop_type}-{impact_type} "
+                "event dominant return period successfully stored to file!"
+            )
+
+    def store_regional_dominant_period(self, no_trend: bool):
+        """Stores dominant return period (with or without detrending) as csv"""
+        if no_trend:
+            container = self.regional_dominant_return_period_no_trend
+            detrend_particle = "detrended"
+        else:
+            container = self.regional_dominant_return_period
+            detrend_particle = ""
+        for impact, data in container.items():
+            median_dominant_period = pd.DataFrame(
+                index=WORLD_REGIONS,
+                columns=data.keys(),
+            )
+            for ssp, data1 in data.items():
+                for region, data2 in data1.items():
+                    self.log.info(
+                        f"Storing {impact}-{ssp}-{region} event dominant return period to file..."
+                    )
+                    full_path = os.path.join(
+                        REGION_OUTPUT_PATH,
+                        impact,
+                    )
+                    if not os.path.exists(full_path):
+                        os.makedirs(full_path)
+                    # store impact count data as csv
+                    data2.fillna(value=np.nan).to_csv(
+                        os.path.join(
+                            full_path, f"{impact}_{region}_dominant_period_{ssp}_NT{NT}{detrend_particle}.csv"
+                        )
+                    )
+                    data2.median(axis=1).fillna(value=np.nan).to_csv(
+                        os.path.join(
+                            full_path, f"{impact}_{region}_dominant_period_{ssp}_NT{NT}_t0_median{detrend_particle}.csv"
+                        )
+                    )
+                    # majority mask for total median result
+                    majority_mask = (
+                        (~data2.fillna(value=np.nan).median(axis=1).isnull()).sum()
+                        >= len(data2.index)/2
+                    )
+                    median_dominant_period.loc[region, ssp] = (
+                        data2.fillna(value=np.nan).median(axis=None)
+                        if majority_mask else np.nan
+                    )
+                    self.log.info(
+                        f"{impact}-{ssp}-{region} event dominant return period successfully stored to file!"
+                    )
+            median_dominant_period.to_csv(
+                os.path.join(full_path, f"{impact}_dominant_period_NT{NT}_total_median{detrend_particle}.csv")
             )
 
     def store_dominant_return_period(self, no_trend: bool):
@@ -896,7 +1444,7 @@ class TimeAnalysisImpacts:
             if not os.path.exists(full_path):
                 os.makedirs(full_path)
             # store impact count data as netcdf
-            xr.Dataset({str(key): val for key, val in data.items()}).to_netcdf(
+            xr.Dataset({str(key): val.astype(float) for key, val in data.items()}).to_netcdf(
                 os.path.join(
                     full_path,
                     f"{self.impact_type}_{impact_type[0].split('_')[1]}"
@@ -920,10 +1468,11 @@ class TimeAnalysisImpacts:
             probabilities = (self.impact_time_series > 0).sum(["time"]) / (
                 self.impact_time_series.count(["time"])
             )
+            impact_particle = self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type
             probabilities.to_netcdf(
                 os.path.join(
                     path_name,
-                    f"{self.impact_type}_{self.ssp_name}_NT{NT}_NT0{len(t_0s)}"
+                    f"{impact_particle}_{self.ssp_name}_NT{NT}_NT0{len(t_0s)}"
                     "_impact_probability.nc",
                 )
             )
@@ -941,7 +1490,7 @@ class TimeAnalysisImpacts:
                 os.path.join(
                     path_name,
                     "total_affected_counts"
-                    + f"_{self.impact_type}_{self.ssp_name}_NT{NT}_NT0{len(t_0s)}.csv",
+                    + f"_{impact_particle}_{self.ssp_name}_NT{NT}_NT0{len(t_0s)}.csv",
                 ),
                 "w",
                 encoding="utf-8",
@@ -978,6 +1527,13 @@ def set_up_parser() -> Union[None, argparse.Namespace]:
         type=str,
         required=True,
     )
+    parser.add_argument(
+        "-crop",
+        "--crop_type",
+        help="name of crop type in case of type specific calculation",
+        type=str,
+        required=RUN_CROP_TYPE_RESOLVED,
+    )
     return parser.parse_args()
 
 
@@ -993,12 +1549,9 @@ def main():
         log_filename = (
             start.strftime("%Y_%m_%d_%H_%M_%S") + "return_period_calculation.log"
         )
-        # create log directory if it doesn't exist
-        log_dir = os.path.join(os.getcwd(), LOG_PATH)
-        os.makedirs(log_dir, exist_ok=True)
         # include log file
         log_handlers.append(
-            logging.FileHandler(os.path.join(log_dir, log_filename))
+            logging.FileHandler(os.path.join(os.getcwd(), LOG_PATH, log_filename))
         )
     logging.basicConfig(
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1019,6 +1572,7 @@ def main():
         raise ValueError(
             "Code cannot operate with USE_MODEL_MEAN and USE_ALL_GCM_MODELS simultaneously!"
         )
+    #surface_area = get_surface_area()
     # initialize time series analysis object
     time_series_analysis = TimeAnalysisImpacts(
         impact_type=flags.impact_type,
@@ -1027,7 +1581,18 @@ def main():
         use_mean=USE_MODEL_MEAN,
         ssp=ALL_SSP_SCENARIOS[flags.ssp_scenario],
         log=logging,
+        crop_type=flags.crop_type,
     )
+    if RUN_REGIONAL_ANALYSIS:
+        logging.info("Calculating regional dominant periods...")
+        time_series_analysis.calculate_regional_dominant_period(no_trend=False)
+        time_series_analysis.calculate_regional_dominant_period(no_trend=True)
+        logging.info("Regional dominant periods successfully calculated!")
+        logging.info("Storing regional dominant periods...")
+        time_series_analysis.store_regional_dominant_period(no_trend=False)
+        time_series_analysis.store_regional_dominant_period(no_trend=True)
+        logging.info("Regional dominant periods successfully stored!")
+        return
     if time_series_analysis.impact_time_series is None:
         return
     time_series_analysis.store_average_impact_probability()
@@ -1035,8 +1600,9 @@ def main():
         time_series_analysis.count_impacts()
     # store them extreme event counts in time bins
     time_series_analysis.store_extreme_count_bins()
-    # calculate detrended results only for non-picontrol
-    no_trends = [True, False] if flags.ssp_scenario != "picontrol" else [False]
+    # always de-trend results for consistency with red noise test
+    # and since we are not interested in general trends
+    no_trends = [True, False]
     for no_trend in no_trends:
         logging.info(f"Analysing detrended results: {no_trend}...")
         if time_series_analysis.impact_time_series is not None:
@@ -1047,11 +1613,17 @@ def main():
         if RUN_DOMINANT_FREQUENCY_CALC:
             # calculate dominant return period
             time_series_analysis.calculate_dominant_return_period(no_trend=no_trend)
-    # store dominant return period
-    if time_series_analysis.dominant_return_period_t0_no_trend is not None:
-        time_series_analysis.store_dominant_return_period(no_trend=True)
-    if time_series_analysis.dominant_return_period_t0 is not None:
-        time_series_analysis.store_dominant_return_period(no_trend=False)
+    if not (RUN_CROP_TYPE_RESOLVED and flags.impact_type == "cropfailedarea"):
+        # store dominant return period
+        if time_series_analysis.dominant_return_period_t0_no_trend is not None:
+            time_series_analysis.store_dominant_return_period(no_trend=True)
+        if time_series_analysis.dominant_return_period_t0 is not None:
+            time_series_analysis.store_dominant_return_period(no_trend=False)
+    else:
+        if time_series_analysis.dominant_return_period_t0_no_trend is not None:
+            time_series_analysis.store_cropspecific_dominant_period(no_trend=True)
+        if time_series_analysis.dominant_return_period_t0 is not None:
+            time_series_analysis.store_cropspecific_dominant_period(no_trend=False)
     end = datetime.now(pytz.timezone("UTC"))
     logging.info(
         "Thank you for running the simulation! \n Total time: %s", str(end - start)
