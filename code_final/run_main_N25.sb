@@ -38,7 +38,6 @@ do
   for type in $IMPACT_TYPE
   do
     echo ssp=$ssp impact_type=$type
-    #sbatch run_main.sh $ssp $type
     bash run_main.sh $ssp $type
   done
 done

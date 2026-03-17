@@ -10,7 +10,9 @@ USE_ISIMIP3B_TO_3A_COMPARISON = False
 # use (input) model mean instead of single model combination or all models
 USE_MODEL_MEAN = False
 # use (output) result median instead of single model combination or all models
-USE_RESULT_MEDIAN = False
+USE_RESULT_MEDIAN = True
+# use AR model to determine dominant period
+USE_AR_MODEL = False
 # run on PIK cluster
 USE_PIK_CLUSTER = False
 # run with all gcm models
@@ -19,6 +21,8 @@ USE_ALL_GCM_MODELS = True
 USE_ALL_IMP_MODELS = True
 # run dominant frequency calculations
 RUN_DOMINANT_FREQUENCY_CALC = True
+# run crop resolved dominant return period
+RUN_CROP_TYPE_RESOLVED = False
 # time window for observing time correlations, namely N_t
 NT = 25
 # reference times

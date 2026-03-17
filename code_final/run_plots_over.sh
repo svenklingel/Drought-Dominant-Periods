@@ -7,7 +7,7 @@ EPS_CORR=0.0001
 USE_ISIMIP3A="False"
 USE_ISIMIP3B_TO_3A_COMPARISON="False"
 USE_MODEL_MEAN="False"
-USE_RESULT_MEDIAN="False"
+USE_RESULT_MEDIAN="True"
 USE_PIK_CLUSTER="False"
 RUN_DOMINANT_FREQUENCY_CALC="True"
 USE_ALL_GCM_MODELS="True"
@@ -38,7 +38,6 @@ do
   for type in $IMPACT_TYPE
   do
     echo ssp=$ssp impact_type=$type
-    #sbatch run_main.sh $ssp $type
-    bash run_main.sh $ssp $type
+    bash run_plots.sh $ssp $type
   done
 done
