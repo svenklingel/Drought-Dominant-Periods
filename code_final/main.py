@@ -610,12 +610,11 @@ class TimeAnalysisImpacts:
                             )[0]
                         )
                     ).astype(int)
-                elif (
-                    extreme_ds.time.units.startswith("days since")
-                    and extreme_ds.time.calendar == "365_day"
-                ):
+                elif extreme_ds.time.units.startswith("days since"):
+                    cal = getattr(extreme_ds.time, "calendar", "")
+                    days_in_year = 365 if cal in ["365_day", "noleap"] else 365.2425
                     extreme_ds["time"] = (
-                        extreme_ds.time / 365
+                        np.round(extreme_ds.time / days_in_year)
                         + int(
                             extreme_ds.time.units.replace("days since ", "").split("-")[
                                 0

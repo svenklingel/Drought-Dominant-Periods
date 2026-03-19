@@ -29,11 +29,15 @@ ISIMIP_IMPACT_LABEL = {
     "cropfailedarea": "a",
     "heatwavedarea": "b",
     "burntarea": "c",
+    "floodedarea": "g",
+    "driedarea": "h",
 }
 ISIMIP_IMPACT_PICONTROL_LABEL = {
     "cropfailedarea": "d",
     "heatwavedarea": "e",
     "burntarea": "f",
+    "floodedarea": "i",
+    "driedarea": "j",
 }
 ISMIP_GCM_COLOR = {
     "gfdl-esm4": "tab:red",

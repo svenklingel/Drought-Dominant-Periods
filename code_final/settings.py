@@ -10,7 +10,7 @@ USE_ISIMIP3B_TO_3A_COMPARISON = False
 # use (input) model mean instead of single model combination or all models
 USE_MODEL_MEAN = False
 # use (output) result median instead of single model combination or all models
-USE_RESULT_MEDIAN = True
+USE_RESULT_MEDIAN = False
 # use AR model to determine dominant period
 USE_AR_MODEL = False
 # run on PIK cluster
@@ -45,18 +45,21 @@ SINGLE_GCM_MODEL = (
         "cropfailedarea": "mpi-esm1-2-hr",  # crop-failure
         "heatwavedarea": "gfdl-esm4",  # heatwave
         "burntarea": "ukesm1-0-ll",  # wildfire
+        "floodedarea": "gfdl-esm4",  # floodedarea
     }
     if not USE_ISIMIP3A
     else {
         "cropfailedarea": "gswp3-w5e5",
         "burntarea": "gswp3-w5e5",
         "heatwavedarea": "gswp3-w5e5",
+        "floodedarea": "gswp3-w5e5",
     }
 )
 SINGLE_IMPACT_MODEL = {
     "cropfailedarea": "EPIC-IIASA",  # crop-failure
     "heatwavedarea": "hwmid-none",  # heatwave
     "burntarea": "classic",  # wildfire
+    "floodedarea": "watergap2-2e",  # floodedarea
 }
 
 #########################################
@@ -133,6 +136,7 @@ ALL_IMPACT_MODELS = (
             "hwmid-none",
         ],  # heatwave
         "burntarea": ["classic", "visit", "lpjml5-7-10-fire"],  # wildfire
+        "floodedarea": ["watergap2-2e", "web-dhm-sg"],  # floodedarea
     }
     if not USE_ISIMIP3A
     else {
@@ -151,6 +155,7 @@ ALL_IMPACT_MODELS = (
             "hwmid-none",
         ],  # heatwave
         "burntarea": ["classic", "lpjml5-7-10-fire", "visit"],  # wildfire
+        "floodedarea": ["watergap2-2e", "web-dhm-sg"],  # floodedarea
     }
 )
 # all GCM models
@@ -177,6 +182,13 @@ ALL_GCM_MODELS = (
             "mpi-esm1-2-hr",
             "mri-esm2-0",
         ],
+        "floodedarea": [
+            "gfdl-esm4",
+            "ukesm1-0-ll",
+            "ipsl-cm6a-lr",
+            "mpi-esm1-2-hr",
+            "mri-esm2-0",
+        ],
     }
     if not USE_ISIMIP3A
     else {
@@ -190,5 +202,6 @@ ALL_GCM_MODELS = (
         "burntarea": [
             "gswp3-w5e5",
         ],
+        "floodedarea": ["gswp3-w5e5"],
     }
 )

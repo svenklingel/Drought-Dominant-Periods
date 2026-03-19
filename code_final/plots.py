@@ -159,6 +159,8 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
                 or _filename[-2] != self.ssp_name
             ):
                 continue
+            if str(self.ssp_name) not in filename:
+                continue
             self.log.info(f"Reading file {filename}...")
             # append data into a data set for each extreme event
             if _filename[-4] != self.impact_type and _filename[-3] == "median":
@@ -261,8 +263,9 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
             if (
                 _filename[-4] != "modelcounts"
                 or int(_filename[-2].split("Nt")[1]) != NT
-                or _filename[-3] != self.ssp_name
             ):
+                continue
+            if str(self.ssp_name) not in filename:
                 continue
             self.log.info(f"Reading file {filename}...")
             # append data into a data set for each extreme event
@@ -319,10 +322,7 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
                 self.impact_type if not RUN_CROP_TYPE_RESOLVED else self.crop_type
             )
         )
-        filenames = glob.glob(
-            filenames + "/*.nc",
-            root_dir=filenames,
-        )
+        filenames = glob.glob(filenames + "/*.nc")
         for filename in filenames:
             if not filename.endswith(".nc"):
                 self.log.error(
@@ -337,8 +337,10 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
             if (
                 _filename[-4] != "median"
                 or int(_filename[-2].split("Nt")[1]) != NT
-                or _filename[-3] != self.ssp_name
             ):
+                continue
+            # Falls self.ssp_name als String darin nicht vorkommt...
+            if str(self.ssp_name) not in filename:
                 continue
             self.log.info(f"Reading file {filename}...")
             # append data into a data set for each extreme event
@@ -400,10 +402,7 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
             if data_type == "dominant_return_period"
             else os.path.join(OUTPUT_PATH, output_subpath, data_type, self.impact_type)
         )
-        filenames = glob.glob(
-            filenames + "/*.nc",
-            root_dir=filenames,
-        )
+        filenames = glob.glob(filenames + "/*.nc")
         for filename in filenames:
             if not filename.endswith(".nc"):
                 self.log.error(
@@ -418,8 +417,9 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
             if (
                 _filename[-4] != "std"
                 or int(_filename[-2].split("Nt")[1]) != NT
-                or _filename[-3] != self.ssp_name
             ):
+                continue
+            if str(self.ssp_name) not in filename:
                 continue
             self.log.info(f"Reading file {filename}...")
             # append data into a data set for each extreme event
@@ -1100,8 +1100,9 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
                 "Custom cmap", cmaplist, cmap.N
             )
             # define color bins according to return periods
-            d_bin = 1
-            bins = np.sort(np.append(-2, np.arange(0, int(NT/2)+1, d_bin)))
+            d_bin = 3
+            adjusted_NT = NT if NT >= 25 else 25
+            bins = np.sort(np.append(-2, np.arange(1, adjusted_NT + d_bin, d_bin)))
             # define discrete colormap
             norm = matplotlib.colors.BoundaryNorm(bins, cmap.N)
             # create plot for each data set variable
@@ -1165,6 +1166,21 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
                     rasterized=True,
                 )
                 axis.set_global()
+                # add cbar
+                axis2 = fig.add_axes([0.9, 0.15, 0.03, 0.7])
+                cbar2 = matplotlib.colorbar.ColorbarBase(
+                    axis2,
+                    cmap=cmap,
+                    norm=norm,
+                    spacing="uniform",
+                    ticks=bins,
+                    boundaries=bins,
+                    format="%.1f",
+                )
+                cbar2.set_ticks(ticks=bins, labels=bins)
+                cbar2.ax.set_ylabel(
+                    "Number of extreme events", rotation=90, labelpad=20
+                )
                 # remove frame and ticks
                 axis.spines["top"].set_visible(False)
                 axis.spines["right"].set_visible(False)
@@ -1206,12 +1222,14 @@ class PlotTimeAnalysisImpacts(TimeAnalysisImpacts):
                     cmap=cmap,
                     norm=norm,
                     spacing="uniform",
-                    ticks=bins[1:],
-                    boundaries=bins[1:],
+                    ticks=bins,
+                    boundaries=bins,
                     format="%.1f",
                 )
-                cbar2.set_ticks(ticks=bins[1:], labels=bins[1:])
-                cbar2.ax.set_ylabel("Dominant period [year]", rotation=90, labelpad=20)
+                cbar2.set_ticks(ticks=bins, labels=bins)
+                cbar2.ax.set_ylabel(
+                    "Number of extreme events", rotation=90, labelpad=20
+                )
                 # None colorbar
                 cmaplist = [cmap(i) for i in range(cmap.N)]
                 # force the first color entry (None values) to be grey
