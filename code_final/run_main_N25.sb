@@ -30,8 +30,8 @@ sed -i "s/^USE_ALL_IMP_MODELS = .*/USE_ALL_IMP_MODELS = $USE_ALL_IMP_MODELS/g" s
 
 # available impact models and ssp scenarios
 SSP_SCENARIOS="picontrol ssp585"
-#IMPACT_TYPE="burntarea cropfailedarea heatwavedarea"
-IMPACT_TYPE=heatwavedarea
+#IMPACT_TYPE="burntarea cropfailedarea heatwavedarea floodedarea"
+IMPACT_TYPE=floodedarea
 
 for ssp in $SSP_SCENARIOS
 do

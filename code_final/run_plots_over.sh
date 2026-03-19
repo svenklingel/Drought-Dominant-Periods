@@ -6,8 +6,10 @@ R2_THRESHOLD=0.5
 EPS_CORR=0.0001
 USE_ISIMIP3A="False"
 USE_ISIMIP3B_TO_3A_COMPARISON="False"
+
 USE_MODEL_MEAN="False"
-USE_RESULT_MEDIAN="True"
+USE_RESULT_MEDIAN="False"
+
 USE_PIK_CLUSTER="False"
 RUN_DOMINANT_FREQUENCY_CALC="True"
 USE_ALL_GCM_MODELS="True"
@@ -30,8 +32,23 @@ sed -i "s/^USE_ALL_IMP_MODELS = .*/USE_ALL_IMP_MODELS = $USE_ALL_IMP_MODELS/g" s
 
 # available impact models and ssp scenarios
 SSP_SCENARIOS="picontrol ssp585"
-#IMPACT_TYPE="burntarea cropfailedarea heatwavedarea"
-IMPACT_TYPE=heatwavedarea
+#IMPACT_TYPE="burntarea cropfailedarea heatwavedarea floodedarea"
+IMPACT_TYPE=floodedarea
+
+declare -A ISIMIP_IMPACT_LABEL=(
+    ["cropfailedarea"]="a"
+    ["heatwavedarea"]="b"
+    ["burntarea"]="c"
+    ["floodedarea"]="g"
+    ["driedarea"]="h"
+)
+declare -A ISIMIP_IMPACT_PICONTROL_LABEL=(
+    ["cropfailedarea"]="d"
+    ["heatwavedarea"]="e"
+    ["burntarea"]="f"
+    ["floodedarea"]="i"
+    ["driedarea"]="j"
+)
 
 for ssp in $SSP_SCENARIOS
 do
